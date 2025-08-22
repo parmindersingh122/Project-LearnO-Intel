@@ -1,117 +1,114 @@
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, get_jwt
-from flask_cors import CORS
-from werkzeug.security import generate_password_hash, check_password_hash
+import streamlit as st
+import sqlite3
+import pandas as pd
 from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
 
-app = Flask(__name__)
-CORS(app)
+# -----------------------------
+# Database setup
+# -----------------------------
+conn = sqlite3.connect("lerno.db", check_same_thread=False)
+c = conn.cursor()
 
-# Configurations
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///lerno.db"
-app.config["SECRET_KEY"] = "nitro120"
-app.config["JWT_SECRET_KEY"] = "your_jwt_secret_key"  # Add this
-db = SQLAlchemy(app)
-jwt = JWTManager(app)
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    registered_on TEXT NOT NULL,
+    last_login TEXT
+)
+""")
+conn.commit()
 
-# User model
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(50), unique=True, nullable=False)
-    password = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(10), default="user", nullable=False)  # 'admin' or 'user'
-    registered_on = db.Column(db.DateTime, default=datetime.utcnow)
-    last_login = db.Column(db.DateTime, nullable=True)
-
-# Ensure database is created
-with app.app_context():
-    db.create_all()
-
-# Register a user
-@app.route("/register", methods=["POST"])
-def register():
-    data = request.get_json()
-    username = data.get("username")
-    password = data.get("password")
-    role = data.get("role", "user")  # Default to "user"
-
-    if not username or not password:
-        return jsonify({"message": "Username and password required"}), 400
-
-    if User.query.filter_by(username=username).first():
-        return jsonify({"message": "User already exists"}), 400
-
+# -----------------------------
+# Helper Functions
+# -----------------------------
+def register_user(username, password, role="user"):
     hashed_password = generate_password_hash(password)
-    new_user = User(username=username, password=hashed_password, role=role)
-    db.session.add(new_user)
-    db.session.commit()
+    registered_on = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        c.execute("INSERT INTO users (username, password, role, registered_on) VALUES (?, ?, ?, ?)",
+                  (username, hashed_password, role, registered_on))
+        conn.commit()
+        return True, "✅ User registered successfully!"
+    except sqlite3.IntegrityError:
+        return False, "⚠️ Username already exists."
 
-    return jsonify({"message": "User registered successfully", "role": role}), 201
+def login_user(username, password):
+    c.execute("SELECT * FROM users WHERE username=?", (username,))
+    user = c.fetchone()
+    if user and check_password_hash(user[2], password):
+        last_login = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("UPDATE users SET last_login=? WHERE id=?", (last_login, user[0]))
+        conn.commit()
+        return True, {"id": user[0], "username": user[1], "role": user[3], "registered_on": user[4], "last_login": last_login}
+    return False, "Invalid username or password."
 
-# User login
-@app.route("/login", methods=["POST"])
-def login():
-    data = request.get_json()
-    username = data.get("username")
-    password = data.get("password")
+def get_all_users():
+    c.execute("SELECT id, username, role, registered_on, last_login FROM users")
+    rows = c.fetchall()
+    return pd.DataFrame(rows, columns=["User ID", "Username", "Role", "Registered On", "Last Login"])
 
-    if not username or not password:
-        return jsonify({"message": "Username and password required"}), 400
+# -----------------------------
+# Streamlit App
+# -----------------------------
+st.set_page_config(page_title="LearnO-Intel Auth System", layout="centered")
 
-    user = User.query.filter_by(username=username).first()
-    if not user or not check_password_hash(user.password, password):
-        return jsonify({"message": "Invalid username or password"}), 401
+st.title("🔐 LearnO-Intel User System")
+st.write("Register, Login, and View Dashboard")
 
-    # Update last login time
-    user.last_login = datetime.utcnow()
-    db.session.commit()
+# Initialize session
+if "user" not in st.session_state:
+    st.session_state.user = None
 
-    # Generate JWT token
-    access_token = create_access_token(identity=user.username, additional_claims={"role": user.role})
-    return jsonify({"message": "Login successful", "token": access_token}), 200
+menu = ["Home", "Register", "Login", "Dashboard"]
+choice = st.sidebar.selectbox("Menu", menu)
 
-# Dashboard route (User & Admin Views)
-@app.route("/dashboard", methods=["GET"])
-@jwt_required()
-def dashboard():
-    current_user = get_jwt_identity()  # Get username
-    role = get_jwt()["role"]  # Get role separately
+# Home
+if choice == "Home":
+    st.subheader("Welcome to LearnO-Intel")
+    st.write("A simple AI Tutor app with user authentication (built on Streamlit).")
 
-    user = User.query.filter_by(username=current_user).first()
-    if not user:
-        return jsonify({"message": "User not found"}), 404
+# Register
+elif choice == "Register":
+    st.subheader("Create New Account")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    role = st.selectbox("Role", ["user", "admin"])
+    if st.button("Register"):
+        success, msg = register_user(username, password, role)
+        if success:
+            st.success(msg)
+        else:
+            st.error(msg)
 
-    user_data = {
-        "username": user.username,
-        "user_id": user.id,
-        "role": user.role,
-        "registered_on": user.registered_on.strftime("%Y-%m-%d %H:%M:%S"),
-        "last_login": user.last_login.strftime("%Y-%m-%d %H:%M:%S") if user.last_login else "Never",
-        "message": f"Welcome, {user.username}!"
-    }
+# Login
+elif choice == "Login":
+    st.subheader("Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        success, result = login_user(username, password)
+        if success:
+            st.session_state.user = result
+            st.success(f"Welcome {result['username']}! You are logged in as {result['role']}.")
+        else:
+            st.error(result)
 
-    if role == "admin":
-        users = User.query.all()
-        all_users = [
-            {
-                "user_id": u.id,
-                "username": u.username,
-                "role": u.role,
-                "registered_on": u.registered_on.strftime("%Y-%m-%d %H:%M:%S"),
-                "last_login": u.last_login.strftime("%Y-%m-%d %H:%M:%S") if u.last_login else "Never"
-            }
-            for u in users
-        ]
-        user_data["all_users"] = all_users
-        user_data["total_users"] = len(users)
+# Dashboard
+elif choice == "Dashboard":
+    if st.session_state.user:
+        user = st.session_state.user
+        st.subheader(f"📊 Dashboard - {user['username']}")
+        st.write(f"**Role:** {user['role']}")
+        st.write(f"**Registered On:** {user['registered_on']}")
+        st.write(f"**Last Login:** {user['last_login']}")
 
-    return jsonify(user_data), 200
-
-# Home route
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({"message": "Lerno API is running!"})
-
-if __name__ == "__main__":
-    app.run(debug=True)
+        if user["role"] == "admin":
+            st.subheader("👥 All Users")
+            df = get_all_users()
+            st.dataframe(df)
+    else:
+        st.warning("⚠️ Please login first.")
